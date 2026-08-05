@@ -1,6 +1,6 @@
 {
 	"name": "@michaelrwalker/braid",
-	"version": "0.0.0",
+	"version": "0.0.1",
 	"description": "Stitch a main collection together with related detail collections using indexed, O(n+m) joins and a type-safe fluent builder.",
 	"type": "module",
 	"main": "main.ts",
