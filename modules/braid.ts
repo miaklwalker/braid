@@ -3,6 +3,7 @@ import {
 	type BraidKey,
 	type BraidResult,
 	type BraidRow,
+	type BraidSource,
 	BraidError,
 	type DetailOf,
 	type IsAsyncSource,
@@ -12,19 +13,36 @@ import {
 	type JoinValue,
 	type MainConfig,
 	type RejectDuplicateJoinName,
+	type RejectMainAliasCollision,
 } from "./types.ts";
 
 /** The main collection with its generics erased, as stored on the builder. */
 interface MainSpec {
 	readonly name?: string;
-	readonly source: readonly object[];
 	// biome-ignore lint/suspicious/noExplicitAny: erased internal storage — the typed facade on .main() is what consumers see
+	readonly source: BraidSource<any>;
+	// biome-ignore lint/suspicious/noExplicitAny: as above
 	readonly key: (item: any) => BraidKey;
+	readonly as?: string;
 }
 
 /** Renders a key for an error message without throwing on symbols. */
 function describeKey(key: BraidKey): string {
 	return typeof key === "string" ? JSON.stringify(key) : String(key);
+}
+
+/** Anything with a `then` — a promise, or another braid. */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	return (
+		typeof (value as { then?: unknown } | null | undefined)?.then === "function"
+	);
+}
+
+/** Whether a value could be a source at all: an array, a fetcher, or a thenable. */
+function isSourceLike(value: unknown): boolean {
+	return (
+		Array.isArray(value) || typeof value === "function" || isThenable(value)
+	);
 }
 
 /**
@@ -54,13 +72,28 @@ function describeKey(key: BraidKey): string {
  * 	.run();
  * // Array<Product & { bigcommerce: BcProduct | null; variations: Variation[] }>
  * ```
+ *
+ * Pass `as` to nest the main row instead of spreading it, which is what lets
+ * braids compose: a braid is itself a valid source, so two braids can be
+ * stitched together by a third without their fields colliding.
+ *
+ * ```ts
+ * const listings = new Braid().main({ source: listRows, key: (l) => l.sku, as: "listing" });
+ * const catalogue = new Braid().main({ source: products, key: (p) => p.sku, as: "product" });
+ *
+ * const combined = await new Braid()
+ * 	.main({ source: listings, key: (row) => row.listing.sku, as: "listing" })
+ * 	.join({ name: "catalogue", source: catalogue, on: (row) => row.product.sku, type: "single" })
+ * 	.run();
+ * ```
  */
 export class Braid<
-	TMain extends object = never,
+	TMain = never,
 	TKey extends BraidKey = never,
 	TJoined = Record<never, never>,
 	TNames extends string = never,
 	TAsync extends boolean = false,
+	TAs extends string | undefined = undefined,
 > {
 	#main: MainSpec | undefined;
 	readonly #joins: JoinSpec[] = [];
@@ -70,30 +103,75 @@ export class Braid<
 	 * in source order, and `key` becomes the default extractor for every join
 	 * that doesn't bring its own.
 	 *
+	 * By default the main row is spread across the top level of each output row.
+	 * Give `as` a property name to nest it there instead — necessary when two
+	 * collections share field names, and the basis for composing braids.
+	 *
 	 * Only one main collection may be set: a second call is both a compile error
 	 * and a throw, because silently replacing it would invalidate every join
 	 * already configured against the old row type.
 	 */
-	main<TRow extends object, TRowKey extends BraidKey>(
-		this: Braid<never, never, TJoined, TNames, TAsync>,
-		config: MainConfig<TRow, TRowKey>,
-	): Braid<TRow, TRowKey, TJoined, TNames, TAsync> {
+	main<
+		TSource extends BraidSource<object>,
+		TRowKey extends BraidKey,
+		TMainAs extends string | undefined = undefined,
+	>(
+		this: Braid<never, never, TJoined, TNames, TAsync, TAs>,
+		config: MainConfig<TSource, TRowKey, TMainAs>,
+	): Braid<
+		DetailOf<TSource>,
+		TRowKey,
+		TJoined,
+		TNames,
+		TAsync extends true ? true : IsAsyncSource<TSource>,
+		TMainAs
+	> {
 		if (this.#main !== undefined) {
 			throw new BraidError(
 				"A main collection is already defined. Call .main() once per Braid instance.",
 			);
 		}
-		if (!Array.isArray(config?.source)) {
-			throw new BraidError(".main() requires a `source` array.");
+		if (!isSourceLike(config?.source)) {
+			throw new BraidError(
+				".main() requires a `source` array, promise, braid, or a function returning one.",
+			);
 		}
 		if (typeof config.key !== "function") {
 			throw new BraidError(
 				".main() requires a `key` function, e.g. { key: (row) => row.id }.",
 			);
 		}
+		if (
+			config.as !== undefined &&
+			(typeof config.as !== "string" || config.as.length === 0)
+		) {
+			throw new BraidError(
+				".main() was given an `as` that is not a non-empty string.",
+			);
+		}
+		if (
+			config.as !== undefined &&
+			this.#joins.some((join) => join.name === config.as)
+		) {
+			throw new BraidError(
+				`A join named "${config.as}" is already defined, so the main collection can't also be attached as "${config.as}".`,
+			);
+		}
 
-		this.#main = { name: config.name, source: config.source, key: config.key };
-		return this as unknown as Braid<TRow, TRowKey, TJoined, TNames, TAsync>;
+		this.#main = {
+			name: config.name,
+			source: config.source,
+			key: config.key,
+			as: config.as,
+		};
+		return this as unknown as Braid<
+			DetailOf<TSource>,
+			TRowKey,
+			TJoined,
+			TNames,
+			TAsync extends true ? true : IsAsyncSource<TSource>,
+			TMainAs
+		>;
 	}
 
 	/**
@@ -106,9 +184,7 @@ export class Braid<
 	 */
 	join<
 		TName extends string,
-		TSource extends
-			| readonly unknown[]
-			| (() => readonly unknown[] | Promise<readonly unknown[]>),
+		TSource extends BraidSource<unknown>,
 		TType extends JoinType,
 		TRequired extends boolean = false,
 		TDefault = TType extends "many" ? DetailOf<TSource>[] : null,
@@ -123,7 +199,8 @@ export class Braid<
 			TDefault,
 			TJoinKey
 		> &
-			RejectDuplicateJoinName<TName, TNames>,
+			RejectDuplicateJoinName<TName, TNames> &
+			RejectMainAliasCollision<TName, TAs>,
 	): Braid<
 		TMain,
 		TKey,
@@ -131,7 +208,8 @@ export class Braid<
 			[K in TName]: JoinValue<DetailOf<TSource>, TType, TRequired, TDefault>;
 		},
 		TNames | TName,
-		TAsync extends true ? true : IsAsyncSource<TSource>
+		TAsync extends true ? true : IsAsyncSource<TSource>,
+		TAs
 	> {
 		const spec = config as unknown as JoinConfig<
 			TMain,
@@ -151,9 +229,14 @@ export class Braid<
 				`A join named "${spec.name}" is already defined. Join names become properties on the output row, so they must be unique.`,
 			);
 		}
-		if (!Array.isArray(spec.source) && typeof spec.source !== "function") {
+		if (this.#main?.as === spec.name) {
 			throw new BraidError(
-				`Join "${spec.name}" requires a \`source\` array or a function returning one.`,
+				`The main collection is already attached as "${spec.name}", so a join can't use that name too.`,
+			);
+		}
+		if (!isSourceLike(spec.source)) {
+			throw new BraidError(
+				`Join "${spec.name}" requires a \`source\` array, promise, braid, or a function returning one.`,
 			);
 		}
 		if (typeof spec.on !== "function") {
@@ -197,7 +280,8 @@ export class Braid<
 				[K in TName]: JoinValue<DetailOf<TSource>, TType, TRequired, TDefault>;
 			},
 			TNames | TName,
-			TAsync extends true ? true : IsAsyncSource<TSource>
+			TAsync extends true ? true : IsAsyncSource<TSource>,
+			TAs
 		>;
 	}
 
@@ -214,22 +298,25 @@ export class Braid<
 	 * array, and a promise when any source is a fetcher — the return type follows
 	 * the sources, so there's nothing to remember at the call site.
 	 */
-	run(): BraidResult<TMain, TJoined, TAsync> {
+	run(): BraidResult<TMain, TJoined, TAsync, TAs> {
 		const result = this.#hasAsyncSource()
 			? this.#runAsync()
-			: this.#stitch(this.#resolveSync());
-		return result as unknown as BraidResult<TMain, TJoined, TAsync>;
+			: this.#stitch(
+					this.#requireMain().source as readonly object[],
+					this.#joins.map((spec) => spec.source as unknown[]),
+				);
+		return result as unknown as BraidResult<TMain, TJoined, TAsync, TAs>;
 	}
 
 	/**
 	 * Makes the builder itself awaitable, so `await new Braid()...` works whether
 	 * or not any source turned out to be async.
 	 */
-	// biome-ignore lint/suspicious/noThenProperty: a thenable builder is the point — it lets `await braid` stand in for `.run()`
-	then<TFulfilled = BraidRow<TMain, TJoined>[], TRejected = never>(
+	// biome-ignore lint/suspicious/noThenProperty: a thenable builder is the point — it lets `await braid` stand in for `.run()`, and lets a braid be used directly as another braid's source
+	then<TFulfilled = BraidRow<TMain, TJoined, TAs>[], TRejected = never>(
 		onfulfilled?:
 			| ((
-					value: BraidRow<TMain, TJoined>[],
+					value: BraidRow<TMain, TJoined, TAs>[],
 			  ) => TFulfilled | PromiseLike<TFulfilled>)
 			| null,
 		onrejected?:
@@ -242,37 +329,57 @@ export class Braid<
 		) as Promise<TFulfilled | TRejected>;
 	}
 
+	/** A braid is synchronous only if every source, main included, is already an array. */
 	#hasAsyncSource(): boolean {
-		return this.#joins.some((spec) => typeof spec.source === "function");
-	}
-
-	#resolveSync(): readonly unknown[][] {
-		return this.#joins.map((spec) => spec.source as unknown[]);
-	}
-
-	async #runAsync(): Promise<Record<string, unknown>[]> {
-		const resolved = await Promise.all(
-			this.#joins.map(async (spec) => {
-				const rows =
-					typeof spec.source === "function" ? await spec.source() : spec.source;
-				if (!Array.isArray(rows)) {
-					throw new BraidError(
-						`Join "${spec.name}" has a \`source\` function that did not resolve to an array.`,
-					);
-				}
-				return rows as unknown[];
-			}),
+		return (
+			(this.#main !== undefined && !Array.isArray(this.#main.source)) ||
+			this.#joins.some((spec) => !Array.isArray(spec.source))
 		);
-		return this.#stitch(resolved);
 	}
 
-	#stitch(resolved: readonly unknown[][]): Record<string, unknown>[] {
+	#requireMain(): MainSpec {
 		const main = this.#main;
 		if (main === undefined) {
 			throw new BraidError(
 				"No main collection defined. Call .main({ source, key }) before running the braid.",
 			);
 		}
+		return main;
+	}
+
+	/** Resolves one source, whatever wrapper it arrived in. */
+	static async #resolve(
+		source: BraidSource<unknown>,
+		label: string,
+	): Promise<unknown[]> {
+		const rows = typeof source === "function" ? await source() : await source;
+		if (!Array.isArray(rows)) {
+			throw new BraidError(`${label} did not resolve to an array.`);
+		}
+		return rows;
+	}
+
+	async #runAsync(): Promise<Record<string, unknown>[]> {
+		const main = this.#requireMain();
+		const [mainRows, joinRows] = await Promise.all([
+			Braid.#resolve(
+				main.source,
+				`The ${main.name ?? "main"} collection's \`source\``,
+			),
+			Promise.all(
+				this.#joins.map((spec) =>
+					Braid.#resolve(spec.source, `Join "${spec.name}"'s \`source\``),
+				),
+			),
+		]);
+		return this.#stitch(mainRows as readonly object[], joinRows);
+	}
+
+	#stitch(
+		mainRows: readonly object[],
+		resolved: readonly unknown[][],
+	): Record<string, unknown>[] {
+		const main = this.#requireMain();
 
 		const indexes = this.#joins.map((spec, position) => {
 			const rows = resolved[position] ?? [];
@@ -282,8 +389,11 @@ export class Braid<
 		});
 
 		const stitched: Record<string, unknown>[] = [];
-		for (const row of main.source) {
-			const output: Record<string, unknown> = { ...row };
+		for (const row of mainRows) {
+			// `as` nests the main row instead of spreading it, so two collections
+			// with overlapping field names can share an output row.
+			const output: Record<string, unknown> =
+				main.as === undefined ? { ...row } : { [main.as]: row };
 
 			for (let position = 0; position < this.#joins.length; position += 1) {
 				const spec = this.#joins[position];
@@ -333,7 +443,8 @@ export type InferBraidRow<TBraid> =
 		infer _TKey,
 		infer TJoined,
 		infer _TNames,
-		infer _TAsync
+		infer _TAsync,
+		infer TAs
 	>
-		? BraidRow<TMain, TJoined>
+		? BraidRow<TMain, TJoined, TAs>
 		: never;

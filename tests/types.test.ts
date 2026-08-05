@@ -4,6 +4,7 @@ import { Braid, BraidError, type InferBraidRow } from "../modules/index.ts";
 import {
 	BC_PRODUCTS,
 	type BcProduct,
+	type Product,
 	PRODUCTS,
 	SHOPIFY_PRODUCTS,
 	VARIATIONS,
@@ -95,6 +96,66 @@ describe("accumulated row type", () => {
 		>;
 
 		assert.deepStrictEqual(builder.joinNames, ["shopify"]);
+	});
+});
+
+describe("nested main rows", () => {
+	test("`as` moves the main row under its own property in the row type", () => {
+		const rows = new Braid()
+			.main({ source: PRODUCTS, key: (p) => p.sku, as: "product" })
+			.join({
+				name: "bigcommerce",
+				source: BC_PRODUCTS,
+				on: (bc) => bc.sku,
+				type: "single",
+			})
+			.run();
+
+		type Row = (typeof rows)[number];
+		type _Nested = Expect<Equal<Row["product"], Product>>;
+		type _Join = Expect<Equal<Row["bigcommerce"], BcProduct | null>>;
+		// The main row's own fields are no longer at the top level.
+		type _Keys = Expect<Equal<keyof Row, "product" | "bigcommerce">>;
+
+		assert.deepStrictEqual(Object.keys(rows[0] as object), [
+			"product",
+			"bigcommerce",
+		]);
+	});
+
+	test("InferBraidRow accounts for the alias", () => {
+		const builder = new Braid().main({
+			source: PRODUCTS,
+			key: (p) => p.sku,
+			as: "product",
+		});
+
+		type Row = InferBraidRow<typeof builder>;
+		type _Row = Expect<Equal<Row, { product: Product }>>;
+
+		assert.deepStrictEqual(builder.joinNames, []);
+	});
+
+	test("a braid used as a source contributes its own nested row type", async () => {
+		const inner = new Braid()
+			.main({ source: PRODUCTS, key: (p) => p.sku, as: "product" })
+			.join({
+				name: "bigcommerce",
+				source: BC_PRODUCTS,
+				on: (bc) => bc.sku,
+				type: "single",
+			});
+
+		const rows = await new Braid()
+			.main({ source: inner, key: (row) => row.product.sku, as: "listing" })
+			.run();
+
+		type Row = (typeof rows)[number];
+		type _Inner = Expect<
+			Equal<Row["listing"], { product: Product; bigcommerce: BcProduct | null }>
+		>;
+
+		assert.strictEqual(rows[0]?.listing.bigcommerce?.bcId, 101);
 	});
 });
 

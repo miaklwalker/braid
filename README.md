@@ -48,6 +48,9 @@ second `.main()` are all compile errors rather than runtime surprises. Each is
 checked again at runtime, because types are erased and data arrives from the
 network.
 
+Sources can be arrays, promises, fetchers — or other braids, so a stitched
+result can be stitched again. See [Composing braids](#composing-braids).
+
 ## Install
 
 ```bash
@@ -61,17 +64,52 @@ code and you get real source in your editor rather than a `.d.ts` shadow.
 ## `.main(config)`
 
 Declares the driving collection. One output row is produced per item, in source
-order, and each output row is a shallow copy — Braid never mutates your input.
+order, and Braid never mutates your input.
 
 | field    | type                   | required | description                                                                    |
 | -------- | ---------------------- | -------- | ------------------------------------------------------------------------------ |
 | `name`   | `string`               | no       | Informational label used in error messages. Doesn't affect the output shape.    |
-| `source` | `T[]`                  | yes      | The driving array.                                                              |
+| `source` | `Source<T>`            | yes      | The driving collection — an array, a promise, another braid, or a fetcher.       |
 | `key`    | `(item: T) => BraidKey`| yes      | Default key extractor, used by any `.join()` that doesn't specify its own.      |
+| `as`     | `string`               | no       | Nests the main row under this property instead of spreading it.                 |
 
 Only one main collection may be set per builder. A second `.main()` is a compile
 error and throws, because silently replacing it would invalidate every join
 already configured against the old row type.
+
+### Spread or nested
+
+By default the main row is spread across the top level of each output row, which
+is what you want when the main collection is the thing you're enriching:
+
+```ts
+new Braid()
+	.main({ source: products, key: (p) => p.sku })
+	.join({ name: "bigcommerce", source: bcProducts, on: (bc) => bc.sku, type: "single" })
+	.run();
+// [{ id, sku, title, bigcommerce }]
+```
+
+Pass `as` to nest it under its own property instead:
+
+```ts
+new Braid()
+	.main({ source: products, key: (p) => p.sku, as: "product" })
+	.join({ name: "bigcommerce", source: bcProducts, on: (bc) => bc.sku, type: "single" })
+	.run();
+// [{ product: { id, sku, title }, bigcommerce }]
+```
+
+Nesting earns its keep in two places: when the main collection and a join share
+field names and you'd rather not think about which one won, and when the result
+is going to be braided again — see [Composing braids](#composing-braids).
+
+Two details worth knowing. Key extractors always receive the **raw** main row,
+never the nested wrapper, so `key: (p) => p.id` reads the same either way. And
+spreading necessarily copies each main row, while nesting stores the original
+reference — the same treatment joined detail rows already get. Braid still never
+writes to your rows, but with `as` a mutation of `row.product` is a mutation of
+your source.
 
 Keys must be primitives (`string`, `number`, `bigint`, `boolean`, `symbol`, or
 nullish). Joining on object references is technically possible with a `Map` but
@@ -86,7 +124,7 @@ Adds a detail collection, attached to every output row under `name`.
 | field      | type                            | required | default                              | description                                                            |
 | ---------- | ------------------------------- | -------- | ------------------------------------ | ---------------------------------------------------------------------- |
 | `name`     | `string`                        | yes      | —                                    | Property name the result is attached under.                            |
-| `source`   | `D[]` \| `() => D[] \| Promise<D[]>` | yes | —                                    | Detail array, or a fetcher returning one.                              |
+| `source`   | `Source<D>`                     | yes      | —                                    | Detail collection — an array, a promise, another braid, or a fetcher.  |
 | `on`       | `(item: D) => BraidKey`         | yes      | —                                    | Key extractor for the detail rows.                                     |
 | `key`      | `(item: T) => BraidKey`         | no       | the main `key`                       | Overrides which key on the main row this join matches against.         |
 | `type`     | `"single"` \| `"many"`          | yes      | —                                    | One matching row, or an array of them.                                 |
@@ -166,10 +204,19 @@ Join "dbProduct" is required, but no match was found for listing row with key "2
 
 ## `.run()` and async sources
 
-If every source is an array, `.run()` returns the stitched array directly. If any
-source is a function, all the fetchers are started concurrently and `.run()`
-returns a promise — the return type follows the sources, so there's nothing to
-remember at the call site:
+A source — main or join — is anything that is or will be an array:
+
+| source              | example                          | keeps `.run()` sync? |
+| ------------------- | -------------------------------- | -------------------- |
+| an array            | `source: bcProducts`             | yes                  |
+| a fetcher           | `source: () => fetchBc()`        | no                   |
+| a promise           | `source: fetchBc()`              | no                   |
+| another braid       | `source: listingBraid`           | no                   |
+
+If every source is an array, `.run()` returns the stitched array directly.
+Otherwise everything is resolved concurrently and `.run()` returns a promise —
+the return type follows the sources, so there's nothing to remember at the call
+site:
 
 ```ts
 const rows = new Braid()
@@ -200,6 +247,43 @@ it inline (`source: fetcherFor(rows)`), inference can't see through it and the
 detail type collapses to `unknown`. Assign it to a variable first, or pass the
 type argument explicitly. Plain arrows (`source: () => fetchBc()`) and direct
 function references are unaffected.
+
+## Composing braids
+
+Every braid is thenable, which means a braid is a valid source for another
+braid. Stitch each concern separately, then stitch the results:
+
+```ts
+const listings = new Braid()
+	.main({ source: listRows, key: (l) => l.sku, as: "listing" })
+	.join({ name: "channelOne", source: () => fetchChannelOne(), on: (i) => i.sku, type: "single" })
+	.join({ name: "channelTwo", source: () => fetchChannelTwo(), on: (i) => i.sku, type: "single" });
+
+const catalogue = new Braid()
+	.main({ source: dbProducts, key: (p) => p.id, as: "product" })
+	.join({ name: "skus", source: dbSkus, on: (s) => s.productId, type: "many" });
+
+const combined = await new Braid()
+	.main({ source: listings, key: (row) => row.listing.sku, as: "listing" })
+	.join({ name: "catalogue", source: catalogue, on: (row) => row.product.sku, type: "single" })
+	.run();
+// [{ listing: { listing, channelOne, channelTwo }, catalogue: { product, skus } | null }]
+```
+
+This is what `as` is really for. Without it, the two inner braids' fields would
+land in the same flat namespace and collide; with it, each keeps its own. The
+types follow all the way through, so `combined[0].listing.channelOne` is checked
+and `combined[0].catalogue?.skus` knows it's an array.
+
+Composition inherits everything else: the outer braid is async because a braid
+source has to be awaited, a `required: true` join against an inner braid throws
+the same way, and each inner braid still indexes its own sources once. Inner
+braids run concurrently with each other — they're resolved through the same
+`Promise.all` as any other source. A braid runs once per outer `.run()` with no
+memoisation, so if the same braid feeds two others, `await` it once and pass the
+array.
+
+`examples/compose.ts` runs the whole thing end to end.
 
 ## Types
 
@@ -280,12 +364,14 @@ immediately rather than at `.run()`:
 | when                                                    | thrown by |
 | ------------------------------------------------------- | --------- |
 | `.main()` called twice                                  | `.main()` |
-| `source` isn't an array, or `key` isn't a function      | `.main()` |
+| `source` isn't a collection, or `key` isn't a function  | `.main()` |
+| `as` is set to something other than a non-empty string  | `.main()` |
 | `name`, `source`, `on`, or `type` missing or malformed  | `.join()` |
 | a join name is reused                                   | `.join()` |
+| a join name collides with the main `as`                 | `.join()` |
 | `.run()` with no main collection                        | `.run()`  |
 | a `required` join finds no match for some row           | `.run()`  |
-| a `source` function doesn't resolve to an array         | `.run()`  |
+| a `source` doesn't resolve to an array                  | `.run()`  |
 
 The `required` message includes the offending key, which is usually enough to
 find the row on its own:
