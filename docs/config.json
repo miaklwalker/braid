@@ -1,0 +1,83 @@
+{
+	"sections": [
+		{
+			"label": "Getting Started",
+			"children": [
+				{
+					"label": "Overview",
+					"to": "overview"
+				},
+				{
+					"label": "Installation",
+					"to": "installation"
+				},
+				{
+					"label": "Quick Start",
+					"to": "quick-start"
+				}
+			]
+		},
+		{
+			"label": "Guides",
+			"children": [
+				{
+					"label": "The main collection",
+					"to": "guides/main-collection"
+				},
+				{
+					"label": "Declaring joins",
+					"to": "guides/declaring-joins"
+				},
+				{
+					"label": "Single vs many",
+					"to": "guides/single-vs-many"
+				},
+				{
+					"label": "Defaults and required joins",
+					"to": "guides/defaults-and-required"
+				},
+				{
+					"label": "Key equality and nullish keys",
+					"to": "guides/key-equality"
+				},
+				{
+					"label": "Composite and derived keys",
+					"to": "guides/composite-and-derived-keys"
+				},
+				{
+					"label": "Composing braids",
+					"to": "guides/composing-braids"
+				},
+				{
+					"label": "Async sources",
+					"to": "guides/async-sources"
+				},
+				{
+					"label": "Performance",
+					"to": "guides/performance"
+				},
+				{
+					"label": "Type safety",
+					"to": "guides/type-safety"
+				}
+			]
+		},
+		{
+			"label": "Reference",
+			"children": [
+				{
+					"label": "Braid API",
+					"to": "reference/api"
+				},
+				{
+					"label": "Configuration",
+					"to": "reference/configuration"
+				},
+				{
+					"label": "Errors",
+					"to": "reference/errors"
+				}
+			]
+		}
+	]
+}
