@@ -177,6 +177,7 @@ export interface JoinConfig<
 	TRequired extends boolean,
 	TDefault,
 	TJoinKey extends BraidKey,
+	TRowSoFar,
 > {
 	/** Property name this join's result is attached under on each output row. */
 	readonly name: TName;
@@ -186,6 +187,20 @@ export interface JoinConfig<
 	readonly on: (item: DetailOf<TSource>) => NoInfer<TJoinKey>;
 	/** Overrides which key on the main row this join matches against. */
 	readonly key?: (item: TMain) => TJoinKey;
+	/**
+	 * Keys off the row as stitched *so far* rather than the main row, which is
+	 * how you follow a chain: join the product, then reach through it for the
+	 * model, then through the model for the brand — all flat on one row.
+	 *
+	 * The parameter is typed as the accumulated row at this point in the chain,
+	 * so reaching for a join that hasn't been declared yet is a compile error,
+	 * and reaching through an optional one is correctly nullable. A nullish key
+	 * means no match, so a miss upstream propagates as a miss here rather than
+	 * throwing.
+	 *
+	 * Mutually exclusive with `key`.
+	 */
+	readonly from?: (row: TRowSoFar) => TJoinKey;
 	/** Explicit, never inferred: see the README on why `single` vs `many` isn't guessed. */
 	readonly type: TType;
 	/** Value used when no detail row matches. Defaults to `null` for `single`, a fresh `[]` for `many`. */
@@ -207,6 +222,8 @@ export interface JoinSpec {
 	readonly on: (item: any) => BraidKey;
 	// biome-ignore lint/suspicious/noExplicitAny: as above — checked at the typed facade, erased here
 	readonly key?: (item: any) => BraidKey;
+	// biome-ignore lint/suspicious/noExplicitAny: as above — the row-so-far type differs at every position in the chain
+	readonly from?: (row: any) => BraidKey;
 	readonly type: JoinType;
 	readonly hasDefault: boolean;
 	readonly default: unknown;

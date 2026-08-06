@@ -197,7 +197,8 @@ export class Braid<
 			TType,
 			TRequired,
 			TDefault,
-			TJoinKey
+			TJoinKey,
+			BraidRow<TMain, TJoined, TAs>
 		> &
 			RejectDuplicateJoinName<TName, TNames> &
 			RejectMainAliasCollision<TName, TAs>,
@@ -218,7 +219,8 @@ export class Braid<
 			TType,
 			TRequired,
 			TDefault,
-			TJoinKey
+			TJoinKey,
+			BraidRow<TMain, TJoined, TAs>
 		>;
 
 		if (typeof spec?.name !== "string" || spec.name.length === 0) {
@@ -249,6 +251,16 @@ export class Braid<
 				`Join "${spec.name}" was given a \`key\` that is not a function.`,
 			);
 		}
+		if (spec.from !== undefined && typeof spec.from !== "function") {
+			throw new BraidError(
+				`Join "${spec.name}" was given a \`from\` that is not a function.`,
+			);
+		}
+		if (spec.key !== undefined && spec.from !== undefined) {
+			throw new BraidError(
+				`Join "${spec.name}" was given both \`key\` and \`from\`. \`key\` reads the main row, \`from\` reads the row as stitched so far — pick one.`,
+			);
+		}
 		if (spec.type !== "single" && spec.type !== "many") {
 			throw new BraidError(
 				`Join "${spec.name}" requires \`type\` to be "single" or "many", got ${describeKey(
@@ -267,6 +279,7 @@ export class Braid<
 			source: spec.source as JoinSpec["source"],
 			on: spec.on as JoinSpec["on"],
 			key: spec.key as JoinSpec["key"],
+			from: spec.from as JoinSpec["from"],
 			type: spec.type,
 			hasDefault: Object.hasOwn(spec, "default"),
 			default: spec.default,
@@ -400,7 +413,12 @@ export class Braid<
 				const index = indexes[position];
 				if (spec === undefined || index === undefined) continue;
 
-				const key = (spec.key ?? main.key)(row);
+				// `from` reads the row as stitched so far, which is what makes a chain
+				// of joins work: earlier joins have already written their properties.
+				const key =
+					spec.from !== undefined
+						? spec.from(output)
+						: (spec.key ?? main.key)(row);
 				const match = isJoinableKey(key) ? index.get(key) : undefined;
 
 				if (match !== undefined) {
@@ -408,10 +426,14 @@ export class Braid<
 					continue;
 				}
 				if (spec.required) {
+					const chainHint =
+						spec.from !== undefined && !isJoinableKey(key)
+							? " Its `from` produced a nullish key, so an earlier join in the chain may not have matched."
+							: "";
 					throw new BraidError(
 						`Join "${spec.name}" is required, but no match was found for ${
 							main.name ?? "main"
-						} row with key ${describeKey(key)}.`,
+						} row with key ${describeKey(key)}.${chainHint}`,
 					);
 				}
 				output[spec.name] = spec.hasDefault

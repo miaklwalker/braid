@@ -56,6 +56,53 @@ export const VARIATIONS: readonly Variation[] = [
 	{ productId: 2, option: "default", stock: 12 },
 ];
 
+/**
+ * A three-hop chain for `from`: a listing points at a product, which points at
+ * a model, which points at a brand. Each hop has a deliberate hole — one
+ * listing points at no product, and one model points at no brand — so a chain
+ * can be tested where it breaks as well as where it holds.
+ */
+export interface ListingRow {
+	readonly sku: string;
+	readonly productId: number;
+}
+
+export interface DbProduct {
+	readonly id: number;
+	readonly modelId: number;
+	readonly name: string;
+}
+
+export interface DbModel {
+	readonly id: number;
+	readonly brandId: number;
+	readonly name: string;
+}
+
+export interface DbBrand {
+	readonly id: number;
+	readonly name: string;
+}
+
+export const LISTING_ROWS: readonly ListingRow[] = [
+	{ sku: "TEE-BLK", productId: 1 },
+	{ sku: "MUG-RED", productId: 2 },
+	{ sku: "ORPHAN", productId: 99 },
+];
+
+export const DB_PRODUCTS: readonly DbProduct[] = [
+	{ id: 1, modelId: 10, name: "Black tee" },
+	{ id: 2, modelId: 11, name: "Red mug" },
+];
+
+/** Model 11 points at a brand that doesn't exist, breaking the chain's last hop. */
+export const DB_MODELS: readonly DbModel[] = [
+	{ id: 10, brandId: 100, name: "Tee" },
+	{ id: 11, brandId: 999, name: "Mug" },
+];
+
+export const DB_BRANDS: readonly DbBrand[] = [{ id: 100, name: "Threadline" }];
+
 /** Wraps a fixture in a fetcher, so async paths can be tested without a network. */
 function fetcherFor<T>(
 	rows: readonly T[],

@@ -127,6 +127,7 @@ Adds a detail collection, attached to every output row under `name`.
 | `source`   | `Source<D>`                     | yes      | —                                    | Detail collection — an array, a promise, another braid, or a fetcher.  |
 | `on`       | `(item: D) => BraidKey`         | yes      | —                                    | Key extractor for the detail rows.                                     |
 | `key`      | `(item: T) => BraidKey`         | no       | the main `key`                       | Overrides which key on the main row this join matches against.         |
+| `from`     | `(row: RowSoFar) => BraidKey`   | no       | —                                    | Keys off the row as stitched so far, for chaining. Excludes `key`.     |
 | `type`     | `"single"` \| `"many"`          | yes      | —                                    | One matching row, or an array of them.                                 |
 | `default`  | `D` \| `D[]` \| `null`          | no       | `null` for `single`, `[]` for `many` | Value used when nothing matches.                                       |
 | `required` | `boolean`                       | no       | `false`                              | Throw if any main row finds no match.                                  |
@@ -167,6 +168,73 @@ Three behaviours are worth knowing about rather than discovering:
 When you don't supply a `default`, each unmatched `many` row gets its own empty
 array, so mutating one row's result can't affect another. When you do supply
 one, that exact value is used for every miss — share it only if you mean to.
+
+### Chained joins
+
+`key` reads the main row. `from` reads the row **as stitched so far**, which is
+how you follow a chain of references — a listing points at a product, which
+points at a model, which points at a brand — and get all three flat on one row:
+
+```ts
+const rows = new Braid()
+	.main({ source: listRows, key: (l) => l.sku })
+	.join({ name: "dbProduct", source: dbProducts, on: (p) => p.id, key: (l) => l.productId, type: "single" })
+	.join({ name: "dbModel", source: dbModels, on: (m) => m.id, from: (row) => row.dbProduct?.modelId, type: "single" })
+	.join({ name: "dbBrand", source: dbBrands, on: (b) => b.id, from: (row) => row.dbModel?.brandId, type: "single" })
+	.run();
+// [{ sku, productId, dbProduct: DbProduct | null, dbModel: DbModel | null, dbBrand: DbBrand | null }]
+```
+
+Each hop is still indexed once — `dbModels` is scanned a single time no matter
+how many rows reach through it — so a five-deep chain is O(n + m₁ + … + m₅).
+
+`from`'s parameter is typed as the accumulated row at that point in the chain,
+which does real work:
+
+- Reaching for a join declared **later** is a compile error, because it isn't on
+  the row yet. (At runtime it would silently produce `undefined` and match
+  nothing, which is exactly the bug the type catches.)
+- Reaching **through** an optional join is correctly nullable, so TypeScript
+  makes you write `row.dbProduct?.modelId` rather than letting you assume a hit.
+- The main row's own fields are there too, so `from` can do anything `key` can.
+  Use `key` when you're reading the main row — it says what you mean.
+
+A nullish key is a miss, so a break anywhere in the chain nulls out everything
+below it and leaves everything above it intact. With `required: true` the break
+throws instead, and the message says the cause may be upstream:
+
+```
+Join "dbModel" is required, but no match was found for listing row with key undefined.
+Its `from` produced a nullish key, so an earlier join in the chain may not have matched.
+```
+
+`key` and `from` are mutually exclusive; passing both throws at `.join()` rather
+than silently picking one. That check is runtime-only — the types allow it.
+
+Chaining and composition solve different problems. Chain with `from` when you
+want one flat row. Compose braids when the sub-results are independently useful,
+or when you'd rather keep each collection's fields in their own namespace.
+
+There's a performance axis too, and it turns on how many main rows share a key.
+Chaining does one lookup per hop per main row; composing enriches each *inner*
+row once and then does a single lookup per main row — but it enriches the whole
+inner collection, whether or not you reach for all of it. So chaining wins when
+the main collection is a slice of the inner one, composing wins when many main
+rows point at the same inner row, and the two are level in between. Measured
+over the eight-join graph in `examples/listVerification.ts`:
+
+| main rows | inner rows | chained | composed |
+| --------- | ---------- | ------- | -------- |
+| 500       | 50,000     | 31.7ms  | 39.6ms   |
+| 20,000    | 20,000     | 14.1ms  | 13.8ms   |
+| 200,000   | 5,000      | 49.6ms  | 30.6ms   |
+
+Neither is a landslide, so reach for whichever reads better unless you're at one
+of the extremes.
+`examples/chain.ts` runs the chain above end to end, and
+`examples/listVerification.ts` does it at full scale — one row enriched from six
+database tables and three channel sources, mixing main-key joins, chained `from`
+joins, `many` joins and a normalised string key.
 
 ### Key equality
 
@@ -369,6 +437,7 @@ immediately rather than at `.run()`:
 | `name`, `source`, `on`, or `type` missing or malformed  | `.join()` |
 | a join name is reused                                   | `.join()` |
 | a join name collides with the main `as`                 | `.join()` |
+| both `key` and `from` are given                         | `.join()` |
 | `.run()` with no main collection                        | `.run()`  |
 | a `required` join finds no match for some row           | `.run()`  |
 | a `source` doesn't resolve to an array                  | `.run()`  |
